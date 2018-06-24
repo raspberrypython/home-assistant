@@ -4,7 +4,6 @@ Support for Linksys Access Points.
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/device_tracker.linksys_ap/
 """
-import base64
 import logging
 
 import requests
@@ -50,8 +49,15 @@ class LinksysAPDeviceScanner(DeviceScanner):
         self.verify_ssl = config[CONF_VERIFY_SSL]
         self.last_results = []
 
+        # Disable urllib3 warning spam: InsecureRequestWarning:
+        #                               Unverified HTTPS request is being made.
+        if not self.verify_ssl:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
         # Check if the access point is accessible
-        response = self._make_request()
+        session = self._login()
+        response = self._make_request(session)
         if not response.status_code == 200:
             raise ConnectionError("Cannot connect to Linksys Access Point")
 
@@ -77,9 +83,10 @@ class LinksysAPDeviceScanner(DeviceScanner):
 
         _LOGGER.info("Checking Linksys AP")
 
+        session = self._login()
         self.last_results = []
         for interface in range(INTERFACES):
-            request = self._make_request(interface)
+            request = self._make_request(session, interface)
             self.last_results.extend(
                 [x.find_all('td')[1].text
                  for x in BS(request.content, "html.parser")
@@ -88,12 +95,26 @@ class LinksysAPDeviceScanner(DeviceScanner):
 
         return True
 
-    def _make_request(self, unit=0):
+    def _login(self):
+        """Get session data of access point"""
+        url = 'https://{}/login.cgi'.format(self.host)
+        data = {'login_name': self.username,
+                'login_pwd': self.password,
+                'todo': 'login',
+                'this_file': 'login.htm',
+                'next_file': 'StatusClients.htm'}
+        session = requests.Session()
+        request = session.post(
+            url, timeout=DEFAULT_TIMEOUT, verify=self.verify_ssl, data=data)
+
+        if not request.status_code == 200:
+            raise ConnectionError("Cannot log in to Linksys Access Point")
+
+        return session
+
+    def _make_request(self, session, unit=0):
         # No, the '&&' is not a typo - this is expected by the web interface.
-        login = base64.b64encode(bytes(self.username, 'utf8')).decode('ascii')
-        pwd = base64.b64encode(bytes(self.password, 'utf8')).decode('ascii')
         url = 'https://{}/StatusClients.htm&&unit={}&vap=0'.format(
             self.host, unit)
-        return requests.get(
-            url, timeout=DEFAULT_TIMEOUT, verify=self.verify_ssl,
-            cookies={'LoginName': login, 'LoginPWD': pwd})
+        return session.get(
+            url, timeout=DEFAULT_TIMEOUT, verify=self.verify_ssl)
